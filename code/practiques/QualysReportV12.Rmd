@@ -1,0 +1,550 @@
+---
+title: "Analisis i entrenament d'un model de machine learning"
+author: "Isarn i Xavier"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+#PREPARACIÓ FITXER latest.qkdb.xml.zip
+
+Amb el programa en python "modificar.xml.py", afegim les entrades de solution, consequence i diagnosis que no existeixen, perque el programa en R tingui el mateix nombre de files a tots els camps que treballem.
+
+La sortida del programa en python, és: "latest.qkdb.out.zip", que es guarda en local a la carpeta del codi i que és la entrada de dades que fa servir l'actual codi
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(dplyr)
+library(tm)
+library(caret)
+
+
+#XAVIER I ISARN
+# Read XML document
+#raw.file = "../../data/qualys/latest.qkdb.xml.zip"
+#raw.file = "../../data/qualys/latest.qkdb.out.xml"
+raw.file = "./latest.qkdb.out.zip"
+
+
+doc <- xml2::read_xml(raw.file)
+
+#XAVIER I ISARN
+
+kdb_txt <- data.frame(qid = rvest::html_text(rvest::html_elements(doc, xpath = "//VULN/QID")),
+                  title = rvest::html_text(rvest::html_elements(doc, xpath = "//VULN/TITLE")),
+                  vuln_type = rvest::html_text(rvest::html_elements(doc, xpath = "//VULN/VULN_TYPE")),
+                  category = rvest::html_text(rvest::html_elements(doc, xpath = "//VULN/CATEGORY")),
+                  severity = rvest::html_text(rvest::html_elements(doc, xpath = "//VULN/SEVERITY_LEVEL")),
+                  patchable = rvest::html_text(rvest::html_elements(doc, xpath = "//VULN/PATCHABLE")),
+                  published = rvest::html_text(rvest::html_elements(doc, xpath = "//VULN/LAST_SERVICE_MODIFICATION_DATETIME")),
+                  solution = rvest::html_text(rvest::html_elements(doc, xpath = "//VULN/SOLUTION")),
+                  consequence = rvest::html_text(rvest::html_elements(doc, xpath = "//VULN/CONSEQUENCE")),
+                  diagnosis = rvest::html_text(rvest::html_elements(doc, xpath = "//VULN/DIAGNOSIS")),
+                  stringsAsFactors = FALSE)
+kdb_txt$published <- as.POSIXct.POSIXlt(strptime(x = kdb_txt$published, format = "%Y-%m-%dT%TZ"))
+
+# ISARN I XAVIER
+# AFegim els 3 camps solution, consequence i diagnosis
+# Extract QID, SEVERITY_LEVEL and DIAGNOSIS
+#kdb_txt <- rvest::html_text(rvest::html_elements(doc, xpath="//VULN[DIAGNOSIS]/*[self::QID or self::SEVERITY_LEVEL or self::SOLUTION or self::CONSEQUENCE or self::DIAGNOSIS]"))
+
+#kdb_txt <- rvest::html_text(rvest::html_elements(doc, xpath="//VULN[DIAGNOSIS]/*[self::QID or self::SEVERITY_LEVEL or self::DIAGNOSIS]"))
+
+#kdb_txt <- matrix(kdb_txt, nrow = length(kdb_txt)/3, ncol = 3, byrow = TRUE)
+
+# ISARN I XAVIER
+#kdb_txt
+
+#kdb_txt <- matrix(kdb_txt, nrow = length(kdb_txt)/3, ncol = 5, byrow = TRUE)
+
+
+#kdb_txt <- as.data.frame.matrix(kdb_txt)
+#names(kdb_txt) <- c("qid", "severity", "solution", "consequence", "diagnosis")
+#names(kdb_txt) <- c("qid", "severity", "diagnosis")
+
+
+#ISARN I XAVIER ELIMINEM ELS CAMPS OMPLERTS A MÀ
+kdb_txt <- kdb_txt[kdb_txt$solution != "solution", ]
+kdb_txt <- kdb_txt[kdb_txt$consequence != "consequence", ]
+kdb_txt <- kdb_txt[kdb_txt$diagnosis != "diagnosis", ]
+
+
+#Eliminem paraules que hem vist que estan tant a SI com a NO
+#CONSEQUENCE
+#aquest funciona
+#kdb_txt$consequence <- gsub("\\b(?i)(users|access|information|code|complete|change|configuration|execute|arbitrary|explotation|remote|successful|service|allow|cause|denial|vulnerability|system|exploited|attacker|sensitive|also|use|gain|malicious|contents|can)\\b", " ", kdb_txt$consequence)
+
+#kdb_txt$consequence <- gsub("\\bvulnerability\\b|\\bsystem\\b|\\bexploited\\b|\\battacker\\b|\\bsensitive\\b|\\balso\\b|\\buse\\b|\\bgame\\b|\\bmalicious\\b|\\bcontents\\b|\\bcan\\b", " ", kdb_txt$consequence)
+
+
+
+#NETEJEM CODI, I BUSQUEM PATRONS
+#OK
+kdb_txt$consequence <- gsub("[Cc][Vv][Ee]-\\d{4}-\\d{4}", "cve-xxxx", kdb_txt$consequence)
+#OK
+kdb_txt$consequence <- gsub("infection", "infected", kdb_txt$consequence)
+#kdb_txt$consequence <- gsub("<A HREF.*?>", "webhttp", kdb_txt$consequence)
+
+#OK
+kdb_txt$consequence <- gsub("\\b(can|use|also)\\b", " ", kdb_txt$consequence)
+#kdb_txt$consequence <- gsub("\\b[Ee]xploit.*?\\b", "exploit", kdb_txt$consequence)
+
+#kdb_txt$consequence <- gsub("\\b[Gg]ain access\\b", "access", kdb_txt$consequence)
+##kdb_txt$consequence <- gsub("\\bremote code execution\\b", "remotecodeexecution", kdb_txt$consequence)
+#kdb_txt$consequence <- gsub("\\bremote.?*\\b", "remote", kdb_txt$consequence)
+
+#kdb_txt$diagnosis <- gsub("[Cc][Vv][Ee]-\\d{4}-\\d{4}", "cve-xxxx", kdb_txt$diagnosis)
+#kdb_txt$solution <- gsub("[Cc][Vv][Ee]-\\d{4}-\\d{4}", "cve-xxxx", kdb_txt$solution)
+
+
+
+#Escollim el camp que volem analitzar
+kdb_txt$analisis <- kdb_txt$consequence
+
+
+
+```
+#Analitzem si el recompte de paraules de cada opció mostra algun patró per poder entrenar la IA.
+
+
+
+
+```{r contar_palabras, include=FALSE}
+
+# Contamos las palabras y gráfica de DIAGNOSIS
+#campo = "kdb$diagnosis"
+kdb <- kdb_txt
+
+# Dividir cada cadena de caracteres en palabras utilizando la función strsplit
+palabras <- sapply(kdb$diagnosis, function(x) strsplit(x, " "))
+#palabras
+
+# Contar el número de palabras en cada cadena de caracteres utilizando la función length
+num_palabras <- unlist(lapply(palabras, length))
+#num_palabras
+
+# Hacer un gráfico de puntos del número de palabras en cada cadena de caracteres
+library(ggplot2)
+
+# Hacer un gráfico de puntos del número de palabras en cada cadena de caracteres
+datos <- data.frame(num_palabras,  severity = kdb$severity)
+```
+<div class="row">
+  <div class="col-sm-4">
+
+```{r, fig.cap="DIAGNOSIS", echo=FALSE}
+ 
+    
+ggplot(datos, aes(x = num_palabras, y = severity)) +
+  geom_point(alpha = 0.2) +
+  labs(x = "Número de palabras", y = "severity")
+
+
+
+# Contamos las palabras y gráfica de SOLUTION
+#campo = "kdb$solution"
+
+
+# Dividir cada cadena de caracteres en palabras utilizando la función strsplit
+palabras <- sapply(kdb$solution, function(x) strsplit(x, " "))
+#palabras
+
+# Contar el número de palabras en cada cadena de caracteres utilizando la función length
+num_palabras <- unlist(lapply(palabras, length))
+#num_palabras
+
+# Hacer un gráfico de puntos del número de palabras en cada cadena de caracteres
+datos <- data.frame(num_palabras,  severity = kdb$severity)
+```
+  </div>
+  <div class="col-sm-4">
+```{r, fig.cap="SOLUTION", echo=FALSE}
+
+ggplot(datos, aes(x = num_palabras, y = severity)) +
+  geom_point(alpha = 0.2) +
+  labs(x = "Número de palabras", y = "severity")
+
+# Contamos las palabras y gráfica de CONSEQUENCE
+#campo = "kdb$consequence"
+
+
+# Dividir cada cadena de caracteres en palabras utilizando la función strsplit
+palabras <- sapply(kdb$consequence, function(x) strsplit(x, " "))
+#palabras
+
+# Contar el número de palabras en cada cadena de caracteres utilizando la función length
+num_palabras <- unlist(lapply(palabras, length))
+#num_palabras
+
+## Hacer un gráfico de puntos del número de palabras en cada cadena de caracteres
+datos <- data.frame(num_palabras,  severity = kdb$severity)
+
+```
+  </div>
+  <div class="col-sm-4">
+  
+```{r, fig.cap="CONSEQUENCE", echo=FALSE}
+
+ggplot(datos, aes(x = num_palabras, y = severity)) +
+  geom_point(alpha = 0.2) +
+  labs(x = "Número de palabras", y = "severity")
+
+```
+  </div>
+</div>
+
+# Conclusions Gràfic de punts número de paraules vs severitat
+
+De les gràfiques que es mostren, no es poden treure conclusions, ja que no s'hi veu cap relació en cap dels 3 casos, de manera que desestimem aquesta línea de treball, i mirem si analitzant les paraules que apareixen al texte, dona millors resultats
+
+
+```{r, fig.cap="Entrenamos modelo", echo=FALSE, include=FALSE}
+
+
+library(DataExplorer)
+#create_report(kdb)
+
+
+
+
+###############################################################################
+
+# Tidy data frame
+kdb_txt$qid <- as.integer(kdb_txt$qid)
+kdb_txt$severity <- as.integer(kdb_txt$severity)
+
+# ISARN I XAVIER
+# AFegim els 3 camps solution, consequence i diagnosis
+
+kdb_txt$solution <- textclean::replace_html(kdb_txt$solution)
+kdb_txt$consequence <- textclean::replace_html(kdb_txt$consequence)
+kdb_txt$diagnosis <- textclean::replace_html(kdb_txt$diagnosis)
+kdb_txt$analisis <- textclean::replace_html(kdb_txt$analisis)
+
+kdb_txt$critical <- ifelse(test = kdb_txt$severity < 5, yes = "NO", no = "YES")
+kdb_txt$criticalb <- kdb_txt$severity == 5
+
+# Text analysis
+## Stopwords
+
+### DIAGNOSIS -> CONSEQUENCE
+
+freq_word <- sort(table(unlist(strsplit(kdb_txt$analisis, " "))), decreasing = TRUE)
+kdb_words <- names(freq_word)[(which(!(names(freq_word) %in% stopwords::stopwords())))]
+## Characters
+freq_char <- sort(table(unlist(strsplit(kdb_txt$analisis, ""))), decreasing = TRUE)
+
+
+### DIAGNOSIS -> CONSEQUENCE
+
+kdb_txt$descr <- textclean::replace_symbol(kdb_txt$analisis)
+freq_char2 <- sort(table(unlist(strsplit(kdb_txt$descr, ""))), decreasing = TRUE)
+
+
+# Prepare data for training
+kdb_critical <- kdb_txt %>% filter(critical == "YES")
+kdb_other <- kdb_txt %>% filter(critical == "NO")
+
+kdb_ml <- bind_rows(kdb_critical %>% sample_n(4500),
+                    kdb_other %>% sample_n(1500)) %>%
+          sample_n(6000) %>%
+          select(descr, critical)
+table(kdb_ml$critical)
+
+#*******************************************************************
+#                         Classification
+#*******************************************************************
+# install.packages("tm")
+#-------------------------------------------------------------------
+#                  4.2.: Preparing data for Classification
+#-------------------------------------------------------------------
+#Load up the corpus
+# course_raw = scan("data/Course-Descriptions.txt", what="", sep="\n")
+course_raw <- kdb_ml$descr
+
+
+course_corpus <- VCorpus(VectorSource(course_raw))
+inspect(course_corpus[[1]])
+#Convert to lower case
+course_corpus2 <- tm_map(course_corpus, content_transformer(tolower))
+#Remove punctuations
+course_corpus3 <- tm_map(course_corpus2, removePunctuation)
+#Remove stopwords
+course_corpus4 <- tm_map(course_corpus3, removeWords, stopwords())
+inspect(course_corpus4[[1]])
+#Generate TF-IDF matrix
+course_dtm <- DocumentTermMatrix(course_corpus4)
+
+findFreqTerms(course_dtm,5)
+#Remove terms not in 90% of the documents. Only have those that are there
+#in atleast 2 documents
+dense_course_dtm <- removeSparseTerms(course_dtm, .85)
+#Inspect to TF-IDF
+inspect(dense_course_dtm)
+#Convert continuous values to classes = { Yes, No }
+conv_counts <- function(x) {
+  x <- ifelse(x > 0, 1, 0)
+  x <- factor(x, levels = c(0, 1), labels = c("No", "Yes"))
+}
+class_dtm <- apply(dense_course_dtm, MARGIN = 2, conv_counts)
+
+#-------------------------------------------------------------------
+#                  4.3.: Building the model
+#-------------------------------------------------------------------
+#Load the classifications for the descriptions
+# course_classes = scan("data/Course-Classification.txt", what="", sep="\n")
+course_classes <- kdb_ml$critical
+#install.packages("caret")
+#Random split of training and testing sets
+train_set <- createDataPartition(y=course_classes, p=.7,list=FALSE)
+#spliting the dtm
+train_dtm <- class_dtm[train_set,]
+test_dtm <-class_dtm[-train_set,]
+#split the course_classes
+train_classes <- course_classes[train_set]
+test_classes <- course_classes[-train_set]
+
+```
+# Origen de dades
+
+En aquest punt, es fa servir els entrenaments amb "DIAGNOSIS", però utilitzant el fitxer original latest.qkdb.xml.zip.
+
+Accuracy	0.646
+
+# Escollir millor dades d'entrada
+S'utilitzen les dades de "DIAGNOSI" com a referència fent servir el fitxer modificat per nosaltres, latest.qkdb.out.zip, però el resultat obtingut tampoc és òptim. S'obté la precisió més baixa.
+
+Accuracy 0,616
+
+# Neteja de dades
+
+Es torna a utilitzar el fitxer modificat latest.qkdb.out.zip. Després, s'eliminen totes les files que estaven buides i que en el seu moment es van omplir amb el títol de les pròpies columnes ("diagnosis", "solution" i "consequence").
+El resultat obtingut no varia molt del inicial ja que la precisió és del 64,6%.
+
+Accuracy	0.646
+
+# Probem dades d'entrada amb solution
+
+Es fan les proves agafant les dades d'una altra columna, en aquest cas de "SOLUTION", amb 9000 mostres utilitzant un 50%-50% de crítiques i no crítiques. El resultat és una precisió del 62,5%.
+
+Accuracy	0.625
+
+# Càlcul quantitat mostres d'entrada
+
+Es canvia el nombre de mostres proporcionades en "SOLUTION". En aquest cas, es proporciona un 75% de les mostres crítiques i un 25% de les NO crítiques. Amb aquest canvi s'obté una precisió del 73,1%. Es pot observar que les mostres crítiques tenen una molt bona precisió ja que només s'ha equivocat en 264 de les 1394 mostres totals (82% d'encert). No obstant això, les mostres de NO crítiques no tenen una precisió correcta ja que obtenen més errors que encerts (47% d'encert).
+
+<table border=1>
+  <tr>
+    <td>Tipus de mostra</td>
+    <td>SOLUTION</td>
+  </tr>
+  <tr>
+    <td>Nº de mostres</td>
+    <td>6000</td>
+  </tr>
+  <tr>
+    <td>Crítiques</td>
+    <td>4500</td>
+  </tr>
+  <tr>
+    <td>NO crítiques</td>
+    <td>1500</td>
+  </tr>
+  <tr>
+    <td>Accuracy</td>
+    <td>0.731</td>
+  </tr>
+</table>
+
+<table border=1>
+  <tr>
+    <td>SOLUTION</td>
+    <td>NO</td>
+    <td>YES</td>
+  </tr>
+  <tr>
+    <td>NO</td>
+    <td>186</td>
+    <td>220</td>
+  </tr>
+  <tr>
+    <td>YES</td>
+    <td>264</td>
+    <td>1130</td>
+  </tr>
+</table>
+
+
+# Gràfic de números de paraules més frequents vs severitat
+
+#Fem un gràfic de les paraules mes utilitzades de cada opció SOLUTION, CONSEQUENCE i DIAGNOSIS al eix de les X i la seva criticitat (SI, NO) , per veure si tenen algun tipus de tendencia / relació de cara a entrenar la nostra IA.
+
+
+```{r, fig.cap="NO HI HA GRAFIC, NOMES UN PLOT", echo=FALSE, include=FALSE}
+
+
+#grafico_df <- as.data.frame(train_dtm)
+grafico_df <- as.data.frame(class_dtm)
+grafico_df$classes <- kdb_ml$critical
+
+#grafico_df$classes <- train_classes
+
+
+grafico_df_YES <- filter(grafico_df, classes == "YES")
+
+
+contar_yes <- grafico_df_YES %>%
+  summarise_all(.funs = funs(sum(. == "Yes", na.rm = TRUE)))
+
+
+datos <- t(contar_yes)
+
+
+#names(datos_transpuestos) <- c("repeticiones")
+
+
+
+#plot(datos, type = "l", lwd = 2)
+
+datos_df <- data.frame(indice = rownames(datos), valor = datos)
+
+
+
+library(ggplot2)
+library(stringr)
+```
+
+<div class="row">
+  <div class="col-sm-4">
+  
+  
+
+```{r, fig.cap="CONSEQUENCE + SEVERITY = TRUE", echo=FALSE}
+
+
+ggplot(datos_df, aes(x = reorder(indice,-valor), y = valor)) +
+    geom_bar(stat="identity") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+#ggplot(datos_df, aes(x = reorder(indice, -valor), y = valor, size = valor)) +
+#  geom_point(alpha = 0.7) +
+#  scale_size(range = c(1, 15)) +
+#  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+```
+```{r, fig.cap="Això no surt", echo=FALSE, include=FALSE}
+
+# Hacer un gráfico de puntos del número de palabras en cada cadena de caracteres
+#grafico_df <- as.data.frame(train_dtm)
+#grafico_df$classes <- train_classes
+grafico_df <- as.data.frame(class_dtm)
+grafico_df$classes <- kdb_ml$critical
+
+
+
+grafico_df_YES <- filter(grafico_df, classes == "NO")
+
+
+contar_yes <- grafico_df_YES %>%
+  summarise_all(.funs = funs(sum(. == "Yes", na.rm = TRUE)))
+
+
+
+datos <- t(contar_yes)
+
+
+#names(datos_transpuestos) <- c("repeticiones")
+
+#plot(datos, type = "l", lwd = 2)
+
+datos_df <- data.frame(indice = rownames(datos), valor = datos)
+
+
+#datos_df <- filter(datos_df, valor > 750)
+
+
+```
+
+</div>
+  <div class="col-sm-4">
+
+```{r, fig.cap="CONSEQUENCE + SEVERITY = NO", echo=FALSE}
+
+
+
+ggplot(datos_df, aes(x = reorder(indice,-valor), y = valor)) +
+    geom_bar(stat="identity") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+```
+```{r, fig.cap="Entrenament model SOLUTION", echo=FALSE, include=FALSE}
+
+
+#train the model using naive bayes
+suppressWarnings(course_model <- train( data.frame(train_dtm), train_classes, method="nb"))
+
+
+```
+
+
+ </div>
+  <div class="col-sm-4">
+
+  </div>
+</div>
+
+```{r, fig.cap="Resultats entrenament", echo=FALSE}
+```
+#PROBEM AMB DIFERENTS VOLUMS DE DADES D'ENTRADA
+
+Al final el que millor funciona és el rati
+4500 NO
+1500 SI
+
+#NETEJEM CODI, I BUSQUEM PATRONS
+
+De les gràfiques de paraules, veiem que infection i infected estan molt ben puntuades, que hi ha paraules que no aporten (can, use, also ...) i fem un tractament d'aquestes dades, de cara a unificar en una sóla entrada infection i infected, i eliminar les que no calen
+
+Fem servir el següent codi
+
+````
+kdb_txt$consequence <- gsub("[Cc][Vv][Ee]-\\d{4}-\\d{4}", "cve-xxxx", kdb_txt$consequence)
+kdb_txt$consequence <- gsub("infection", "infected", kdb_txt$consequence)
+
+La resta de normalitzacions, no han donat el resultat desitjat
+#kdb_`txt$consequence <- gsub("<A HREF.*?>", "webhttp", kdb_txt$consequence)
+#kdb_txt$consequence <- gsub("\\b[Ee]xploit.*?\\b", "exploit", kdb_txt$consequence)
+#kdb_txt$consequence <- gsub("\\b[Gg]ain access\\b", "access", kdb_txt$consequence)
+##kdb_txt$consequence <- gsub("\\bremote code execution\\b", "remotecodeexecution", kdb_txt$consequence)
+#kdb_txt$consequence <- gsub("\\bremote.?*\\b", "remote", kdb_txt$consequence)
+
+````
+````
+Això fa millorar la efectivitat de l'algoritme d'un a un 0,76/0,77 actual
+
+ 
+```{r, fig.cap="Resultats entrenament", echo=FALSE}
+course_model
+
+```
+```{r, fig.cap="Entrenament model SOLUTION", echo=FALSE, include=FALSE}
+
+
+#-------------------------------------------------------------------
+#                  4.3.: Predictions for Text
+#-------------------------------------------------------------------
+#Predict for the test data
+course_predictions <- predict(course_model,test_dtm)
+
+```
+```{r, fig.cap="CONCLUSIONS", echo=FALSE}
+
+#Analyze prediction accuracy
+confusionMatrix(table(course_predictions , test_classes))
+#-------------------------------------------------------------------
+
+```
+
+#FI DE CONCLUSIONS
